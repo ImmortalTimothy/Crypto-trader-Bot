@@ -17,9 +17,13 @@ def load_model():
 
 model = load_model()
 
+# Risk Management Settings
+RISK_PER_TRADE = 0.02
+STOP_LOSS_PCT = 0.05
+TX_COST = 0.001
+
 def get_action(df, current_pos):
     last_row = df.iloc[-1]
-    # Observation space: Close, High, Low, Open, Volume, SMA_10, SMA_30, RSI, position
     obs = np.array([
         last_row['Close'], last_row['High'], last_row['Low'],
         last_row['Open'], last_row['Volume'], last_row['SMA_10'],
@@ -28,7 +32,7 @@ def get_action(df, current_pos):
     action, _ = model.predict(obs, deterministic=True)
     return action
 
-st.title("₿ Bitcoin RL Trading Dashboard (1h Interval)")
+st.title("₿ Bitcoin RL Trading Dashboard (2% Risk Rule)")
 
 # Initialize session state
 if 'start_time' not in st.session_state:
@@ -43,11 +47,10 @@ if 'shares' not in st.session_state:
     st.session_state.shares = 0.0
 if 'portfolio_history' not in st.session_state:
     st.session_state.portfolio_history = []
+if 'stop_loss_price' not in st.session_state:
+    st.session_state.stop_loss_price = 0.0
 
 placeholder = st.empty()
-
-# Transaction cost
-TX_COST = 0.001
 
 # Main loop for real-time updates
 while True:
@@ -61,21 +64,42 @@ while True:
         current_price = float(df.iloc[-1]['Close'])
         now = datetime.now()
 
+        # Check for Stop Loss
+        if st.session_state.current_pos == 1 and current_price <= st.session_state.stop_loss_price:
+            st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
+            st.session_state.shares = 0
+            st.session_state.current_pos = 0
+            st.session_state.stop_loss_price = 0.0
+            st.session_state.trade_history.append({'time': now, 'type': 'STOP LOSS EXIT', 'price': current_price})
+
         # Agent decides action
         action = get_action(df, st.session_state.current_pos)
 
         # Execute action logic
         if action == 1 and st.session_state.current_pos == 0:
-            # Buy
-            st.session_state.shares = (st.session_state.balance * (1 - TX_COST)) / current_price
-            st.session_state.balance = 0
+            # Buy with 2% risk rule
+            risk_amount = st.session_state.balance * RISK_PER_TRADE
+            price_risk_per_share = current_price * STOP_LOSS_PCT
+            desired_shares = risk_amount / price_risk_per_share
+            cost = desired_shares * current_price * (1 + TX_COST)
+
+            if cost > st.session_state.balance:
+                st.session_state.shares = (st.session_state.balance * (1 - TX_COST)) / current_price
+                st.session_state.balance = 0
+            else:
+                st.session_state.shares = desired_shares
+                st.session_state.balance -= cost
+
             st.session_state.current_pos = 1
+            st.session_state.stop_loss_price = current_price * (1 - STOP_LOSS_PCT)
             st.session_state.trade_history.append({'time': now, 'type': 'BUY', 'price': current_price})
+
         elif action == 0 and st.session_state.current_pos == 1:
-            # Sell
-            st.session_state.balance = st.session_state.shares * current_price * (1 - TX_COST)
+            # Manual Sell
+            st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
             st.session_state.shares = 0
             st.session_state.current_pos = 0
+            st.session_state.stop_loss_price = 0.0
             st.session_state.trade_history.append({'time': now, 'type': 'SELL', 'price': current_price})
 
         # Update portfolio value
@@ -85,14 +109,13 @@ while True:
         # Calculate metrics
         initial_value = 10000.0
         profit_all_time = current_portfolio_value - initial_value
-
         history_df = pd.DataFrame(st.session_state.portfolio_history, columns=['time', 'value'])
 
-        # Today's profit (since 24h ago)
+        # Daily profit
         val_24h_ago = history_df[history_df['time'] >= (now - timedelta(days=1))]['value'].iloc[0] if not history_df[history_df['time'] >= (now - timedelta(days=1))].empty else current_portfolio_value
         profit_today = current_portfolio_value - val_24h_ago
 
-        # Last hour profit
+        # Hourly profit
         val_1h_ago = history_df[history_df['time'] >= (now - timedelta(hours=1))]['value'].iloc[0] if not history_df[history_df['time'] >= (now - timedelta(hours=1))].empty else current_portfolio_value
         profit_last_hour = current_portfolio_value - val_1h_ago
 
@@ -100,39 +123,30 @@ while True:
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("BTC Price", f"${current_price:,.2f}")
             m2.metric("Portfolio Value", f"${current_portfolio_value:,.2f}")
-            m3.metric("Current Holding", "Bitcoin" if st.session_state.current_pos == 1 else "USD")
-            m4.metric("All-time Profit", f"${profit_all_time:,.2f}", f"{(profit_all_time/initial_value):.2%}")
+            m3.metric("Holding", "Bitcoin" if st.session_state.current_pos == 1 else "USD")
+            m4.metric("Profit All-time", f"${profit_all_time:,.2f}", f"{(profit_all_time/initial_value):.2%}")
 
-            m1b, m2b, m3b = st.columns(3)
-            m1b.metric("Profit (Last 24h)", f"${profit_today:,.2f}")
-            m2b.metric("Profit (Last 1h)", f"${profit_last_hour:,.2f}")
-            m3b.metric("Active Trades", len(st.session_state.trade_history))
+            m1b, m2b, m3b, m4b, m5b = st.columns(5)
+            m1b.metric("Profit (24h)", f"${profit_today:,.2f}")
+            m2b.metric("Profit (1h)", f"${profit_last_hour:,.2f}")
+            m3b.metric("Risk per Trade", f"{RISK_PER_TRADE:.1%}")
+            m4b.metric("Stop Loss", f"{STOP_LOSS_PCT:.1%}")
+            m5b.metric("SL Price", f"${st.session_state.stop_loss_price:,.2f}" if st.session_state.current_pos == 1 else "N/A")
 
-            st.subheader("BTC-USD 1h Chart with Signals")
+            st.subheader("BTC-USD Live Chart")
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="BTC Price", line=dict(color='royalblue', width=2)))
-
-            buys = [t for t in st.session_state.trade_history if t['type'] == 'BUY']
-            sells = [t for t in st.session_state.trade_history if t['type'] == 'SELL']
-
-            if buys:
-                fig.add_trace(go.Scatter(x=[t['time'] for t in buys], y=[t['price'] for t in buys],
-                                         mode='markers', name='Entry', marker=dict(symbol='triangle-up', size=12, color='green')))
-            if sells:
-                fig.add_trace(go.Scatter(x=[t['time'] for t in sells], y=[t['price'] for t in sells],
-                                         mode='markers', name='Exit', marker=dict(symbol='triangle-down', size=12, color='red')))
-
-            fig.update_layout(height=500, margin=dict(l=20, r=20, t=20, b=20))
+            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="BTC Price"))
+            if st.session_state.current_pos == 1:
+                fig.add_hline(y=st.session_state.stop_loss_price, line_dash="dash", line_color="red", annotation_text="Stop Loss")
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Recent Activity")
             if st.session_state.trade_history:
-                history_display = pd.DataFrame(st.session_state.trade_history).tail(10)
-                st.table(history_display)
+                st.table(pd.DataFrame(st.session_state.trade_history).tail(10))
             else:
                 st.info("Waiting for first trade signal...")
 
-            st.caption(f"Last updated: {now.strftime('%Y-%m-%d %H:%M:%S')}. Auto-refreshing every 60 seconds.")
+            st.caption(f"Last updated: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
     except Exception as e:
         st.error(f"Error: {e}")

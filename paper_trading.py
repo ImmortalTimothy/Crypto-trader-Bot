@@ -13,13 +13,17 @@ from utils import get_trading_data
 ALPACA_API_KEY = os.getenv('ALPACA_API_KEY', 'YOUR_API_KEY')
 ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY', 'YOUR_SECRET_KEY')
 
+# Risk Management Settings
+RISK_PER_TRADE = 0.02
+STOP_LOSS_PCT = 0.05
+
 def run_paper_trading():
     model = PPO.load("ppo_trading_model")
 
     # Initialize Alpaca Trading Client
     trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
 
-    print("Starting Paper Trading Bot (Alpaca-py)...")
+    print("Starting Paper Trading Bot (Alpaca-py) with 2% Risk Rule...")
 
     while True:
         try:
@@ -27,11 +31,19 @@ def run_paper_trading():
             last_row = df.iloc[-1]
             current_price = float(last_row['Close'])
 
-            # Get current position
+            # Get current position and account info
             try:
                 position = trading_client.get_open_position('BTCUSD')
                 current_pos = 1 if float(position.qty) > 0 else 0
+                avg_entry_price = float(position.avg_entry_price)
             except:
+                current_pos = 0
+                avg_entry_price = 0.0
+
+            # Check for Stop Loss
+            if current_pos == 1 and current_price <= avg_entry_price * (1 - STOP_LOSS_PCT):
+                print(f"[{datetime.now()}] STOP LOSS EXIT at {current_price}")
+                trading_client.close_position('BTCUSD')
                 current_pos = 0
 
             obs = np.array([
@@ -43,10 +55,18 @@ def run_paper_trading():
             action, _ = model.predict(obs, deterministic=True)
 
             if action == 1 and current_pos == 0:
-                print(f"[{datetime.now()}] Action: BUY at {current_price}")
+                print(f"[{datetime.now()}] Action: BUY with 2% Risk Rule at {current_price}")
                 account = trading_client.get_account()
-                buying_power = float(account.cash) * 0.95
-                qty = buying_power / current_price
+                balance = float(account.cash)
+
+                # Risk Amount = Balance * 2%
+                risk_amount = balance * RISK_PER_TRADE
+                price_risk_per_share = current_price * STOP_LOSS_PCT
+                qty = risk_amount / price_risk_per_share
+
+                # Ensure we have enough balance to cover the position size
+                if qty * current_price > balance * 0.95:
+                    qty = (balance * 0.95) / current_price
 
                 market_order_data = MarketOrderRequest(
                     symbol="BTCUSD",

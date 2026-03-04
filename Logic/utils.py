@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
+import os
 
 def compute_rsi(series, window=14):
     delta = series.diff()
@@ -16,7 +17,7 @@ def get_trading_data(period="7d", interval="1h"):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # Ensure correct column order: Open, High, Low, Close, Volume
+    # Ensure correct column order
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
 
     df['SMA_10'] = df['Close'].rolling(window=10).mean()
@@ -35,5 +36,8 @@ def download_historical_data(ticker="BTC-USD"):
 
     # Standardize column order
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    df.to_csv("btc_data.csv")
-    print(f"Downloaded {len(df)} rows of data for {ticker} (1h)")
+
+    # Save to Data/ folder
+    os.makedirs("Data", exist_ok=True)
+    df.to_csv("Data/btc_data.csv")
+    print(f"Downloaded {len(df)} rows of data for {ticker} (1h) to Data/ folder")

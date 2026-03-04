@@ -1,7 +1,11 @@
 import pandas as pd
-from utils import download_historical_data, compute_rsi
+from Logic.utils import download_historical_data, compute_rsi
+import os
 
-def preprocess_data(csv_path):
+def preprocess_data(csv_path="Data/btc_data.csv"):
+    if not os.path.exists(csv_path):
+        download_historical_data()
+
     # Read the data back
     data = pd.read_csv(csv_path)
     # The index column is named 'Datetime' from yfinance
@@ -17,11 +21,13 @@ def preprocess_data(csv_path):
     data['RSI'] = compute_rsi(data['Close'], window=14)
 
     data = data.dropna().reset_index(drop=True)
+
+    # Save to Data/ folder
+    os.makedirs("Data", exist_ok=True)
+    output_path = "Data/btc_cleaned.csv"
+    data.to_csv(output_path, index=False)
+    print(f"Data preprocessed and saved to {output_path}")
     return data
 
 if __name__ == "__main__":
-    download_historical_data()
-    df = preprocess_data("btc_data.csv")
-    df.to_csv("btc_cleaned.csv", index=False)
-    print("Data preprocessed and saved to btc_cleaned.csv")
-    print(df.head())
+    preprocess_data()

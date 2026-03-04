@@ -5,7 +5,7 @@ from stable_baselines3 import PPO
 import time
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
-from utils import get_trading_data
+from Logic.utils import get_trading_data
 import os
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
@@ -17,8 +17,7 @@ st.set_page_config(page_title="Crypto RL Trader Control", layout="wide")
 # Load the trained model
 @st.cache_resource
 def load_model():
-    # Correct file path in sandbox or prod
-    model_path = "ppo_trading_model.zip"
+    model_path = "Logic/ppo_trading_model.zip"
     if os.path.exists(model_path):
         return PPO.load(model_path)
     return None
@@ -30,8 +29,6 @@ st.sidebar.title("Trading Bot Controls")
 
 # Mode Selection
 run_mode = st.sidebar.selectbox("Mode", ["Simulation", "Paper Trading (Alpaca)"])
-
-# Credentials in sidebar
 api_key = st.sidebar.text_input("Alpaca API Key", type="password") if run_mode == "Paper Trading (Alpaca)" else ""
 api_secret = st.sidebar.text_input("Alpaca Secret Key", type="password") if run_mode == "Paper Trading (Alpaca)" else ""
 
@@ -73,12 +70,12 @@ if kill_switch:
 st.title("₿ Bitcoin RL Trading Dashboard")
 
 if model is None:
-    st.warning("No trained model found! Bot will not start without a model. Please run 'train.py' first.")
+    st.warning("No trained model found! Please run 'Logic/train.py' first.")
 
 # --- Helper Functions ---
 def get_action(df, current_pos):
     if model is None:
-        return 0 # Stay flat if no model
+        return 0
     last_row = df.iloc[-1]
     obs = np.array([
         last_row['Close'], last_row['High'], last_row['Low'],
@@ -88,7 +85,7 @@ def get_action(df, current_pos):
     action, _ = model.predict(obs, deterministic=True)
     return action
 
-# --- Main Dashboard Logic ---
+# --- Main Logic ---
 placeholder = st.empty()
 TX_COST = 0.001
 
@@ -97,7 +94,6 @@ try:
     current_price = float(df.iloc[-1]['Close'])
     now = datetime.now()
 
-    # 1. Kill Switch Execution
     if kill_switch and st.session_state.current_pos == 1:
         if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
             try:
@@ -110,9 +106,7 @@ try:
         st.session_state.trade_history.append({'time': now, 'type': 'KILL SWITCH EXIT', 'price': current_price})
         st.session_state.running = False
 
-    # 2. Main Bot Logic (only if running and model exists)
     if st.session_state.running and model is not None:
-        # Sync position from Alpaca if in live mode
         if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
             try:
                 client = TradingClient(api_key, api_secret, paper=True)
@@ -123,7 +117,6 @@ try:
             except:
                 st.session_state.current_pos = 0
 
-        # Stop Loss Check
         if st.session_state.current_pos == 1 and current_price <= st.session_state.stop_loss_price:
             if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                 try: client.close_position('BTCUSD')
@@ -133,11 +126,9 @@ try:
             st.session_state.current_pos = 0
             st.session_state.trade_history.append({'time': now, 'type': 'STOP LOSS EXIT', 'price': current_price})
 
-        # Action
         action = get_action(df, st.session_state.current_pos)
 
         if action == 1 and st.session_state.current_pos == 0:
-            # BUY
             risk_amt = st.session_state.balance * risk_per_trade
             price_risk = current_price * stop_loss_pct
             qty = risk_amt / price_risk
@@ -162,7 +153,6 @@ try:
             st.session_state.trade_history.append({'time': now, 'type': 'BUY', 'price': current_price})
 
         elif action == 0 and st.session_state.current_pos == 1:
-            # SELL
             if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                 try:
                     client = TradingClient(api_key, api_secret, paper=True)
@@ -173,11 +163,9 @@ try:
             st.session_state.current_pos = 0
             st.session_state.trade_history.append({'time': now, 'type': 'SELL', 'price': current_price})
 
-    # 3. Update Portfolio and UI
+    # UI Update
     current_val = st.session_state.balance + (st.session_state.shares * current_price)
     st.session_state.portfolio_history.append((now, current_val))
-
-    # Limit portfolio history to last 1000 entries
     if len(st.session_state.portfolio_history) > 1000:
         st.session_state.portfolio_history = st.session_state.portfolio_history[-1000:]
 
@@ -188,7 +176,7 @@ try:
 
     with placeholder.container():
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Bot Status", "🏃 Running" if st.session_state.running else "🛑 Stopped")
+        col1.metric("Status", "🏃 Running" if st.session_state.running else "🛑 Stopped")
         col2.metric("Portfolio Value", f"${current_val:,.2f}")
         col3.metric("BTC Price", f"${current_price:,.2f}")
         col4.metric("Holding", "Bitcoin" if st.session_state.current_pos == 1 else "USD")
@@ -199,22 +187,18 @@ try:
         m2.metric("Profit (Last 24h)", f"${p_24h:,.2f}")
         m3.metric("Profit (Last 1h)", f"${p_1h:,.2f}")
 
-        # Chart
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="BTC Price"))
         if st.session_state.current_pos == 1:
             fig.add_hline(y=st.session_state.stop_loss_price, line_dash="dash", line_color="red", annotation_text="Stop Loss")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Trade Log
         st.subheader("Trade Log")
         if st.session_state.trade_history:
-            log_df = pd.DataFrame(st.session_state.trade_history).tail(10)
-            st.table(log_df)
+            st.table(pd.DataFrame(st.session_state.trade_history).tail(10))
 
 except Exception as e:
     st.error(f"Error in dashboard: {e}")
 
-# Auto-refresh using Streamlit's rerun every minute
 time.sleep(60)
 st.rerun()

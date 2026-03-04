@@ -7,7 +7,7 @@ from stable_baselines3 import PPO
 import time
 import os
 from datetime import datetime
-from utils import get_trading_data
+from Logic.utils import get_trading_data
 
 # Alpaca API Credentials
 ALPACA_API_KEY = os.getenv('ALPACA_API_KEY', 'YOUR_API_KEY')
@@ -18,7 +18,12 @@ RISK_PER_TRADE = 0.02
 STOP_LOSS_PCT = 0.05
 
 def run_paper_trading():
-    model = PPO.load("ppo_trading_model")
+    model_path = "Logic/ppo_trading_model"
+    if not os.path.exists(model_path + ".zip"):
+        print(f"⚠️ {model_path}.zip not found. Run train.py first.")
+        return
+
+    model = PPO.load(model_path)
 
     # Initialize Alpaca Trading Client
     trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)

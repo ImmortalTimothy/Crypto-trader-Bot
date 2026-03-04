@@ -1,11 +1,21 @@
 import pandas as pd
 from stable_baselines3 import PPO
-from trading_env import TradingEnv
+from Logic.trading_env import TradingEnv
+from Logic.preprocess_data import preprocess_data
 import os
+import sys
+
+# Ensure project root is in path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def train():
-    # Load data
-    df = pd.read_csv("btc_cleaned.csv")
+    # Load or create data
+    data_path = "Data/btc_cleaned.csv"
+    if not os.path.exists(data_path):
+        print(f"⚠️ {data_path} not found. Running preprocessing...")
+        df = preprocess_data()
+    else:
+        df = pd.read_csv(data_path)
 
     # Split into train and test (80/20)
     split_idx = int(len(df) * 0.8)
@@ -22,7 +32,7 @@ def train():
     model.learn(total_timesteps=50000)
 
     # Save the model
-    model_path = "ppo_trading_model"
+    model_path = "Logic/ppo_trading_model"
     model.save(model_path)
     print(f"Model saved to {model_path}.zip")
 

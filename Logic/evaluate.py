@@ -2,17 +2,16 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
-from trading_env import TradingEnv
+from Logic.trading_env import TradingEnv
+import os
 
 def calculate_metrics(portfolio_history, interval_hours=1):
     returns = pd.Series(portfolio_history).pct_change().dropna()
 
-    # Sharpe Ratio (annualized)
     # 24 * 365 = 8760 trading hours in a crypto year
     annualization_factor = np.sqrt(8760 / interval_hours)
     sharpe_ratio = (returns.mean() / returns.std()) * annualization_factor if returns.std() != 0 else 0
 
-    # Max Drawdown
     cumulative_returns = pd.Series(portfolio_history)
     running_max = cumulative_returns.cummax()
     drawdown = (cumulative_returns - running_max) / running_max
@@ -24,7 +23,12 @@ def calculate_metrics(portfolio_history, interval_hours=1):
 
 def evaluate():
     # Load data
-    df = pd.read_csv("btc_cleaned.csv")
+    data_path = "Data/btc_cleaned.csv"
+    if not os.path.exists(data_path):
+        from Logic.preprocess_data import preprocess_data
+        df = preprocess_data()
+    else:
+        df = pd.read_csv(data_path)
 
     # Split into train and test (80/20)
     split_idx = int(len(df) * 0.8)
@@ -34,7 +38,12 @@ def evaluate():
     env = TradingEnv(test_df)
 
     # Load model
-    model = PPO.load("ppo_trading_model")
+    model_path = "Logic/ppo_trading_model"
+    if not os.path.exists(model_path + ".zip"):
+        print(f"⚠️ {model_path}.zip not found. Run train.py first.")
+        return
+
+    model = PPO.load(model_path)
 
     # Run evaluation
     obs, info = env.reset()
@@ -60,8 +69,9 @@ def evaluate():
     plt.xlabel("Hours")
     plt.ylabel("Portfolio Value (USD)")
     plt.grid(True)
-    plt.savefig("portfolio_performance.png")
-    print("Performance plot saved as portfolio_performance.png")
+    os.makedirs("Data", exist_ok=True)
+    plt.savefig("Data/portfolio_performance.png")
+    print("Performance plot saved as Data/portfolio_performance.png")
 
 if __name__ == "__main__":
     evaluate()

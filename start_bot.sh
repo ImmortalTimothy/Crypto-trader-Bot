@@ -11,9 +11,10 @@ if ! python3 -c "import streamlit, stable_baselines3, alpaca" 2>/dev/null; then
 fi
 
 # Check if model exists
-if [ ! -f "ppo_trading_model.zip" ]; then
+if [ ! -f "Logic/ppo_trading_model.zip" ]; then
     echo "⚠️  Model not found! Running training script first..."
-    python3 train.py
+    # Ensure data exists for training
+    python3 Logic/train.py
 fi
 
 # Run the dashboard

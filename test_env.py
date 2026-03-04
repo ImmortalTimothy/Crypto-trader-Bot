@@ -1,8 +1,15 @@
+from Logic.trading_env import TradingEnv
+from Logic.preprocess_data import preprocess_data
+import os
 import pandas as pd
-from trading_env import TradingEnv
 
 def test_env():
-    df = pd.read_csv("btc_cleaned.csv")
+    data_path = "Data/btc_cleaned.csv"
+    if not os.path.exists(data_path):
+        df = preprocess_data()
+    else:
+        df = pd.read_csv(data_path)
+
     env = TradingEnv(df)
     obs, info = env.reset()
     print(f"Initial observation: {obs}")

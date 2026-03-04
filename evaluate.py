@@ -4,12 +4,13 @@ import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from trading_env import TradingEnv
 
-def calculate_metrics(portfolio_history):
+def calculate_metrics(portfolio_history, interval_hours=1):
     returns = pd.Series(portfolio_history).pct_change().dropna()
 
-    # Sharpe Ratio (assuming daily data, 252 trading days)
-    # Cryptocurrency trades 365 days a year
-    sharpe_ratio = (returns.mean() / returns.std()) * np.sqrt(365) if returns.std() != 0 else 0
+    # Sharpe Ratio (annualized)
+    # 24 * 365 = 8760 trading hours in a crypto year
+    annualization_factor = np.sqrt(8760 / interval_hours)
+    sharpe_ratio = (returns.mean() / returns.std()) * annualization_factor if returns.std() != 0 else 0
 
     # Max Drawdown
     cumulative_returns = pd.Series(portfolio_history)
@@ -56,7 +57,7 @@ def evaluate():
     plt.figure(figsize=(12, 6))
     plt.plot(portfolio_history)
     plt.title("Portfolio Value Over Time (Test Set)")
-    plt.xlabel("Days")
+    plt.xlabel("Hours")
     plt.ylabel("Portfolio Value (USD)")
     plt.grid(True)
     plt.savefig("portfolio_performance.png")

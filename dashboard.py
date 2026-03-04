@@ -1,11 +1,11 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from stable_baselines3 import PPO
 import time
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+from utils import get_trading_data
 
 # Set page config
 st.set_page_config(page_title="Crypto RL Trader", layout="wide")
@@ -16,26 +16,6 @@ def load_model():
     return PPO.load("ppo_trading_model")
 
 model = load_model()
-
-def compute_rsi(series, window=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    # Handle division by zero
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs.fillna(0)))
-
-def get_live_data():
-    # Fetch 1h data to match training interval
-    # Period 7d is enough for indicators
-    df = yf.download("BTC-USD", period="7d", interval="1h", progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df['SMA_10'] = df['Close'].rolling(window=10).mean()
-    df['SMA_30'] = df['Close'].rolling(window=30).mean()
-    df['RSI'] = compute_rsi(df['Close'], window=14)
-    return df.dropna()
 
 def get_action(df, current_pos):
     last_row = df.iloc[-1]
@@ -72,7 +52,7 @@ TX_COST = 0.001
 # Main loop for real-time updates
 while True:
     try:
-        df = get_live_data()
+        df = get_trading_data()
         if df.empty:
             st.error("Failed to fetch data. Retrying in 60s...")
             time.sleep(60)

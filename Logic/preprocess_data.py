@@ -7,7 +7,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 from Logic.utils import download_historical_data, compute_rsi, compute_macd, compute_bollinger_bands
 
-def preprocess_data(csv_path=os.path.join("Data", "btc_data.csv"), indicators=["SMA_10", "SMA_30", "RSI"]):
+def preprocess_data(csv_path=None, indicators=["SMA_10", "SMA_30", "RSI"]):
+    if csv_path is None:
+        csv_path = os.path.join("Data", "btc_data.csv")
+
     if not os.path.exists(csv_path):
         download_historical_data()
 

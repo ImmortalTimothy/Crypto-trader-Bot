@@ -22,23 +22,19 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # Set page config
 st.set_page_config(page_title="Crypto RL Bot Pro", layout="wide")
 
-# Persistent Config to sync indicators
+# Persistent Config
 CONFIG_FILE = os.path.join("Data", "model_config.json")
-
 def save_config(indicators):
     os.makedirs("Data", exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump({"indicators": indicators}, f)
-
+    with open(CONFIG_FILE, "w") as f: json.dump({"indicators": indicators}, f)
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f).get("indicators", ["SMA_10", "SMA_30", "RSI"])
+            with open(CONFIG_FILE, "r") as f: return json.load(f).get("indicators", ["SMA_10", "SMA_30", "RSI"])
         except: pass
     return ["SMA_10", "SMA_30", "RSI"]
 
-# Custom Callback for Visual Training
+# Custom Callback
 class StreamlitCallback(BaseCallback):
     def __init__(self, metrics_placeholder, progress_bar, viz_placeholder):
         super().__init__()
@@ -46,44 +42,52 @@ class StreamlitCallback(BaseCallback):
         self.progress_bar = progress_bar
         self.viz_placeholder = viz_placeholder
         self.rewards = []
+        self.episode_count = 0
 
     def _on_step(self) -> bool:
         if self.n_calls % 100 == 0:
             progress = min(max(self.num_timesteps / self.locals['total_timesteps'], 0.0), 1.0)
             self.progress_bar.progress(progress)
-            reward = np.mean([ep_info['r'] for ep_info in self.model.ep_info_buffer]) if len(self.model.ep_info_buffer) > 0 else 0.0
+
+            # Extract metrics
+            if len(self.model.ep_info_buffer) > 0:
+                reward = np.mean([ep_info['r'] for ep_info in self.model.ep_info_buffer])
+            else:
+                reward = 0.0 # Or current rolling if we tracked it manually
+
             self.rewards.append(reward)
             info = self.locals.get('infos', [{}])[0]
             viz_data = info.get('viz_data', [])
 
             with self.metrics_placeholder.container():
-                c1, c2 = st.columns(2)
+                c1, c2, c3 = st.columns(3)
                 c1.metric("Timesteps", self.num_timesteps)
-                c1.metric("Avg Episode Reward", f"{reward:.4f}")
+                c2.metric("Avg Reward", f"{reward:.4f}")
+
+                # Activity metric
+                trades = sum(1 for d in viz_data if d['action'] == 1)
+                c3.metric("Trades (Last 100)", trades)
+
                 fig_rew = go.Figure()
-                fig_rew.add_trace(go.Scatter(y=self.rewards, name="Mean Reward"))
-                fig_rew.update_layout(title="Reward Curve", height=250, margin=dict(l=10,r=10,t=40,b=10))
+                fig_rew.add_trace(go.Scatter(y=self.rewards, name="Avg Episode Reward"))
+                fig_rew.update_layout(title="Learning Curve", height=250, margin=dict(l=10,r=10,t=40,b=10))
                 st.plotly_chart(fig_rew, width="stretch")
 
             if viz_data:
                 vdf = pd.DataFrame(viz_data)
                 with self.viz_placeholder.container():
-                    st.subheader("🕵️ Model Activity Review")
+                    st.subheader("🕵️ Live Training Signals")
                     fig_cand = go.Figure(data=[go.Candlestick(x=vdf['step'], open=vdf['open'], high=vdf['high'], low=vdf['low'], close=vdf['close'], name="BTC")])
                     buys = vdf[vdf['action'] == 1]
                     if not buys.empty:
-                        fig_cand.add_trace(go.Scatter(x=buys['step'], y=buys['low'] * 0.99, mode='markers', name='Buy Signal', marker=dict(symbol='triangle-up', size=10, color='green')))
-                    fig_cand.update_layout(title="Live Training Snapshot", height=450, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=40,b=10))
+                        fig_cand.add_trace(go.Scatter(x=buys['step'], y=buys['low'] * 0.995, mode='markers', name='Entry', marker=dict(symbol='triangle-up', size=12, color='green')))
+                    fig_cand.update_layout(height=450, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=40,b=10))
                     st.plotly_chart(fig_cand, width="stretch")
         return True
 
-# --- Sidebar Rendering ---
+# --- Sidebar ---
 st.sidebar.title("🤖 Bot Control Center")
-
-# Use a container to prevent duplication on rerun
-sb_mode = st.sidebar.container()
-run_mode = sb_mode.selectbox("Run Mode", ["Simulation", "Paper Trading (Alpaca)", "Backtest"], key="run_mode_select")
-
+run_mode = st.sidebar.selectbox("Run Mode", ["Simulation", "Paper Trading (Alpaca)", "Backtest"], key="run_mode_select")
 if run_mode == "Paper Trading (Alpaca)":
     api_key = st.sidebar.text_input("Alpaca API Key", type="password")
     api_secret = st.sidebar.text_input("Alpaca Secret Key", type="password")
@@ -97,7 +101,6 @@ initial_balance = st.sidebar.number_input("Starting Balance ($)", 100, 100000, 1
 
 st.sidebar.subheader("Execution")
 sim_speed = st.sidebar.select_slider("Refresh Rate (sec)", options=[1, 5, 10, 30, 60], value=60)
-
 col_start, col_stop = st.sidebar.columns(2)
 start_bot = col_start.button("🚀 START", width="stretch")
 stop_bot = col_stop.button("🛑 STOP", width="stretch")
@@ -118,11 +121,6 @@ if 'bt_step' not in st.session_state: st.session_state.bt_step = 0
 
 if start_bot: st.session_state.running = True
 if stop_bot: st.session_state.running = False
-if kill_switch:
-    st.session_state.running = False
-    st.session_state.trade_history = [] # Reset for demo or keep?
-
-st.title("₿ Bitcoin RL Trading Dashboard")
 
 # --- Training Tab ---
 with tab_train:
@@ -132,12 +130,13 @@ with tab_train:
         st.subheader("Model Config")
         model_mode = st.radio("Mode", ["Train Fresh", "Resume Existing"])
         indicators = st.multiselect("Indicators", ["SMA_10", "SMA_30", "RSI", "MACD", "Bollinger"], default=load_config())
-        timesteps = st.number_input("Timesteps", 1000, 1000000, 50000, step=1000)
+        timesteps = st.number_input("Total Timesteps", 1000, 1000000, 100000, step=1000)
+        ep_length = st.slider("Episode Length (Steps)", 100, 5000, 1000)
     with col2:
         st.subheader("Hyperparameters")
-        lr = st.number_input("Learning Rate", 1e-6, 1e-2, 3e-4, format="%.6f")
+        lr = st.number_input("Learning Rate", 1e-6, 1e-2, 1e-4, format="%.6f") # Faster default
         gamma = st.slider("Gamma", 0.8, 0.999, 0.99)
-        ent_coef = st.slider("Entropy", 0.0, 0.1, 0.01, format="%.3f")
+        ent_coef = st.slider("Entropy", 0.0, 0.2, 0.05, format="%.3f") # Higher entropy to promote exploration
 
     train_btn = st.button("🔥 Start Training Session", width="stretch")
     prog_bar = st.progress(0)
@@ -147,16 +146,15 @@ with tab_train:
 
     if train_btn:
         save_config(indicators)
-        with st.spinner("Processing Data..."):
-            df = preprocess_data(indicators=indicators)
-        env = TradingEnv(df, daily_profit_target=daily_profit_target)
+        with st.spinner("Processing Data..."): df = preprocess_data(indicators=indicators)
+        env = TradingEnv(df, daily_profit_target=daily_profit_target, max_steps=ep_length)
         model_path = os.path.join("Logic", "ppo_trading_model")
         if model_mode == "Resume Existing" and os.path.exists(model_path + ".zip"):
             try: model = PPO.load(model_path, env=env, learning_rate=lr, gamma=gamma, ent_coef=ent_coef)
-            except ValueError as e:
-                st.error(f"Cannot resume: {e}"); st.stop()
+            except ValueError as e: st.error(f"Mismatch: {e}"); st.stop()
         else:
-            model = PPO("MlpPolicy", env, verbose=0, device="cpu", learning_rate=lr, gamma=gamma, ent_coef=ent_coef)
+            model = PPO("MlpPolicy", env, verbose=0, device="cpu", learning_rate=lr, gamma=gamma, ent_coef=ent_coef, n_steps=2048, batch_size=64)
+
         st.toast("Training started!")
         callback = StreamlitCallback(metrics_area, prog_bar, viz_area)
         model.learn(total_timesteps=timesteps, callback=callback)
@@ -167,7 +165,6 @@ with tab_train:
 # --- Live/Sim Tab ---
 with tab_live:
     st.header(f"📈 {run_mode} Dashboard")
-
     @st.cache_resource
     def get_validated_model():
         path = os.path.join("Logic", "ppo_trading_model.zip")
@@ -175,128 +172,72 @@ with tab_live:
         try:
             m = PPO.load(path)
             obs_shape = m.observation_space.shape[0]
-            current_indicators = load_config()
-            expected_shape = len(current_indicators) + 5 + 1
-            if obs_shape != expected_shape:
-                return None, f"Mismatch: Model expects {obs_shape} features, UI config provides {expected_shape}. Re-train or fix indicators."
+            expected_shape = len(load_config()) + 5 + 1
+            if obs_shape != expected_shape: return None, f"Mismatch: Re-train model."
             return m, None
         except Exception as e: return None, str(e)
-
     model, err = get_validated_model()
     if err: st.error(err); st.stop()
     if model is None: st.warning("⚠️ No model found."); st.stop()
-
-    placeholder = st.empty()
-    TX_COST = 0.001
-    current_indicators = load_config()
-
+    placeholder = st.empty(); TX_COST = 0.001; current_indicators = load_config()
     try:
-        # Data Acquisition
         if run_mode == "Backtest":
-            if not os.path.exists("Data/btc_cleaned.csv"):
-                preprocess_data(indicators=current_indicators)
+            if not os.path.exists("Data/btc_cleaned.csv"): preprocess_data(indicators=current_indicators)
             full_df = pd.read_csv("Data/btc_cleaned.csv")
-            if st.session_state.bt_step >= len(full_df) - 1:
-                st.session_state.bt_step = 0
-            df = full_df.iloc[:st.session_state.bt_step + 100].tail(100) # Window for visualization
+            if st.session_state.bt_step >= len(full_df) - 1: st.session_state.bt_step = 0
+            df = full_df.iloc[:st.session_state.bt_step + 100].tail(100)
             st.session_state.bt_step += 1
-        else:
-            df = get_trading_data(indicators=current_indicators)
-
-        current_price = float(df.iloc[-1]['Close'])
-        now = datetime.now() if run_mode != "Backtest" else pd.to_datetime(df.iloc[-1]['Date'])
-
-        # Actions
+        else: df = get_trading_data(indicators=current_indicators)
+        current_price = float(df.iloc[-1]['Close']); now = datetime.now() if run_mode != "Backtest" else pd.to_datetime(df.iloc[-1]['Date'])
         if kill_switch and st.session_state.current_pos == 1:
             if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                 try: TradingClient(api_key, api_secret, paper=True).close_position('BTCUSD')
                 except: pass
-            st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
-            st.session_state.shares = 0; st.session_state.current_pos = 0
-            st.session_state.trade_history.append({'time': now, 'type': 'KILL SWITCH', 'price': current_price})
-            st.session_state.running = False
-
+            st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST); st.session_state.shares = 0; st.session_state.current_pos = 0; st.session_state.trade_history.append({'time': now, 'type': 'KILL SWITCH', 'price': current_price}); st.session_state.running = False
         if st.session_state.running:
             if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                 try:
                     client = TradingClient(api_key, api_secret, paper=True)
                     pos = client.get_open_position('BTCUSD')
                     st.session_state.current_pos = 1 if float(pos.qty) > 0 else 0
-                    st.session_state.shares = float(pos.qty)
-                    st.session_state.balance = float(client.get_account().cash)
+                    st.session_state.shares = float(pos.qty); st.session_state.balance = float(client.get_account().cash)
                 except: st.session_state.current_pos = 0
-
-            last_row = df.iloc[-1]
-            feature_cols = [c for c in df.columns if c not in ['Date', 'index', 'Datetime']]
+            last_row = df.iloc[-1]; feature_cols = [c for c in df.columns if c not in ['Date', 'index', 'Datetime']]
             obs = last_row[feature_cols].values / (current_price if current_price != 0 else 1)
             obs = np.append(obs, st.session_state.current_pos).astype(np.float32)
-
             action, _ = model.predict(obs, deterministic=True)
-            dist = model.policy.get_distribution(model.policy.obs_to_tensor(obs)[0])
-            probs = dist.distribution.probs.detach().numpy()[0]
-            confidence = probs[action]
-
+            dist = model.policy.get_distribution(model.policy.obs_to_tensor(obs)[0]); probs = dist.distribution.probs.detach().numpy()[0]; confidence = probs[action]
             if st.session_state.current_pos == 1 and current_price <= st.session_state.stop_loss_price:
                 if run_mode == "Paper Trading (Alpaca)":
                     try: TradingClient(api_key, api_secret, paper=True).close_position('BTCUSD')
                     except: pass
-                st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
-                st.session_state.shares = 0; st.session_state.current_pos = 0
-                st.session_state.trade_history.append({'time': now, 'type': 'STOP LOSS', 'price': current_price})
-
+                st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST); st.session_state.shares = 0; st.session_state.current_pos = 0; st.session_state.trade_history.append({'time': now, 'type': 'STOP LOSS', 'price': current_price})
             if action == 1 and st.session_state.current_pos == 0:
-                risk_amt = st.session_state.balance * risk_per_trade
-                qty = risk_amt / (current_price * stop_loss_pct)
-                cost = qty * current_price * (1 + TX_COST)
-                if cost > st.session_state.balance:
-                    qty = (st.session_state.balance * (1 - TX_COST)) / current_price
-                    cost = st.session_state.balance
+                risk_amt = st.session_state.balance * risk_per_trade; qty = risk_amt / (current_price * stop_loss_pct); cost = qty * current_price * (1 + TX_COST)
+                if cost > st.session_state.balance: qty = (st.session_state.balance * (1 - TX_COST)) / current_price; cost = st.session_state.balance
                 if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                     try: TradingClient(api_key, api_secret, paper=True).submit_order(MarketOrderRequest(symbol="BTCUSD", qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
                     except: pass
-                st.session_state.shares = qty; st.session_state.balance -= cost; st.session_state.current_pos = 1
-                st.session_state.stop_loss_price = current_price * (1 - stop_loss_pct)
-                st.session_state.trade_history.append({'time': now, 'type': 'BUY', 'price': current_price})
+                st.session_state.shares = qty; st.session_state.balance -= cost; st.session_state.current_pos = 1; st.session_state.stop_loss_price = current_price * (1 - stop_loss_pct); st.session_state.trade_history.append({'time': now, 'type': 'BUY', 'price': current_price})
             elif action == 0 and st.session_state.current_pos == 1:
                 if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                     try: TradingClient(api_key, api_secret, paper=True).close_position('BTCUSD')
                     except: pass
-                st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
-                st.session_state.shares = 0; st.session_state.current_pos = 0
-                st.session_state.trade_history.append({'time': now, 'type': 'SELL', 'price': current_price})
-
-        # Display
-        current_val = st.session_state.balance + (st.session_state.shares * current_price)
-        st.session_state.portfolio_history.append((now, current_val))
+                st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST); st.session_state.shares = 0; st.session_state.current_pos = 0; st.session_state.trade_history.append({'time': now, 'type': 'SELL', 'price': current_price})
+        current_val = st.session_state.balance + (st.session_state.shares * current_price); st.session_state.portfolio_history.append((now, current_val))
         hist_df = pd.DataFrame(st.session_state.portfolio_history, columns=['time', 'value'])
-        p_all_time = current_val - initial_balance
-        p_24h = current_val - (hist_df[hist_df['time'] >= (now - timedelta(days=1))]['value'].iloc[0] if not hist_df[hist_df['time'] >= (now - timedelta(days=1))].empty else current_val)
+        p_all_time = current_val - initial_balance; p_24h = current_val - (hist_df[hist_df['time'] >= (now - timedelta(days=1))]['value'].iloc[0] if not hist_df[hist_df['time'] >= (now - timedelta(days=1))].empty else current_val)
         p_1h = current_val - (hist_df[hist_df['time'] >= (now - timedelta(hours=1))]['value'].iloc[0] if not hist_df[hist_df['time'] >= (now - timedelta(hours=1))].empty else current_val)
-
         with placeholder.container():
             if st.session_state.running:
-                st.subheader("🤖 Model Insights")
-                cc1, cc2 = st.columns(2)
-                cc1.info(f"**Action:** {'LONG' if action==1 else 'FLAT'}")
-                cc2.info(f"**Confidence:** {confidence:.1%}")
+                st.subheader("🤖 Model Insights"); cc1, cc2 = st.columns(2); cc1.info(f"**Action:** {'LONG' if action==1 else 'FLAT'}"); cc2.info(f"**Confidence:** {confidence:.1%}")
             st.write("---")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Status", "🏃 Running" if st.session_state.running else "🛑 Stopped")
-            m2.metric("Portfolio", f"${current_val:,.2f}")
-            m3.metric("BTC Price", f"${current_price:,.2f}")
-            m4.metric("Holding", "Bitcoin" if st.session_state.current_pos == 1 else "USD")
-            m1b, m2b, m3b = st.columns(3)
-            m1b.metric("Profit (All)", f"${p_all_time:,.2f}", f"{(p_all_time/initial_balance):.2%}")
-            m2b.metric("Profit (24h)", f"${p_24h:,.2f}")
-            m3b.metric("Profit (1h)", f"${p_1h:,.2f}")
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=df.index if run_mode != "Backtest" else df['Date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="BTC"))
-            if st.session_state.current_pos == 1:
-                fig.add_hline(y=st.session_state.stop_loss_price, line_dash="dash", line_color="red", annotation_text="SL")
-            fig.update_layout(height=450, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, width="stretch")
-            if st.session_state.trade_history:
-                st.table(pd.DataFrame(st.session_state.trade_history).tail(5))
+            m1, m2, m3, m4 = st.columns(4); m1.metric("Status", "🏃 Running" if st.session_state.running else "🛑 Stopped"); m2.metric("Portfolio", f"${current_val:,.2f}"); m3.metric("BTC Price", f"${current_price:,.2f}"); m4.metric("Holding", "Bitcoin" if st.session_state.current_pos == 1 else "USD")
+            m1b, m2b, m3b = st.columns(3); m1b.metric("Profit (All)", f"${p_all_time:,.2f}", f"{(p_all_time/initial_balance):.2%}"); m2b.metric("Profit (24h)", f"${p_24h:,.2f}"); m3b.metric("Profit (1h)", f"${p_1h:,.2f}")
+            fig = go.Figure(); fig.add_trace(go.Candlestick(x=df.index if run_mode != "Backtest" else df['Date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="BTC"))
+            if st.session_state.current_pos == 1: fig.add_hline(y=st.session_state.stop_loss_price, line_dash="dash", line_color="red", annotation_text="SL")
+            fig.update_layout(height=450, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10)); st.plotly_chart(fig, width="stretch")
+            if st.session_state.trade_history: st.table(pd.DataFrame(st.session_state.trade_history).tail(5))
     except Exception as e: st.error(f"Error: {e}")
 
 if st.session_state.running:

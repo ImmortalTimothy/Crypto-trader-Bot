@@ -15,8 +15,11 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
+# Ensure project root is in path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 # Set page config
-st.set_page_config(page_title="Crypto RL Bot", layout="wide")
+st.set_page_config(page_title="Crypto RL Bot v2", layout="wide")
 
 # Custom Callback for Visual Training
 class StreamlitCallback(BaseCallback):
@@ -25,29 +28,33 @@ class StreamlitCallback(BaseCallback):
         self.metrics_placeholder = metrics_placeholder
         self.progress_bar = progress_bar
         self.rewards = []
-        self.losses = []
 
     def _on_step(self) -> bool:
         if self.n_calls % 100 == 0:
-            progress = self.num_timesteps / self.locals['total_timesteps']
+            # FIX: Clip progress to [0.0, 1.0]
+            progress = min(max(self.num_timesteps / self.locals['total_timesteps'], 0.0), 1.0)
             self.progress_bar.progress(progress)
 
-            # Get latest reward
-            reward = np.mean(self.locals.get('rewards', [0]))
+            # Extract mean reward from rollout buffer if available
+            if len(self.model.ep_info_buffer) > 0:
+                reward = np.mean([ep_info['r'] for ep_info in self.model.ep_info_buffer])
+            else:
+                reward = 0.0
+
             self.rewards.append(reward)
 
             with self.metrics_placeholder.container():
                 c1, c2 = st.columns(2)
                 c1.metric("Timesteps", self.num_timesteps)
-                c1.metric("Mean Reward (100 steps)", f"{reward:.4f}")
+                c1.metric("Avg Episode Reward", f"{reward:.4f}")
 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(y=self.rewards, name="Mean Reward"))
-                fig.update_layout(title="Training Progress", height=300)
+                fig.update_layout(title="Training Reward Curve", height=300, margin=dict(l=20,r=20,t=40,b=20))
                 st.plotly_chart(fig, width="stretch")
         return True
 
-# --- Sidebar: Persistent Controls ---
+# --- Sidebar: Bot Control Center ---
 st.sidebar.title("🤖 Bot Control Center")
 
 run_mode = st.sidebar.selectbox("Run Mode", ["Simulation", "Paper Trading (Alpaca)"])
@@ -64,7 +71,7 @@ stop_loss_pct = st.sidebar.slider("Stop Loss (%)", 1.0, 10.0, 5.0) / 100.0
 initial_balance = st.sidebar.number_input("Starting Balance ($)", 100, 100000, 10000)
 
 st.sidebar.subheader("Execution")
-sim_speed = st.sidebar.select_slider("Sim Refresh (sec)", options=[1, 5, 10, 30, 60], value=60)
+sim_speed = st.sidebar.select_slider("Refresh Rate (sec)", options=[1, 5, 10, 30, 60], value=60)
 
 col_start, col_stop = st.sidebar.columns(2)
 start_bot = col_start.button("🚀 START", width="stretch")
@@ -75,20 +82,13 @@ kill_switch = st.sidebar.button("💀 KILL SWITCH", type="primary", width="stret
 tab_live, tab_train = st.tabs(["📊 Live Trading / Sim", "🧠 Training Center"])
 
 # --- Session State ---
-if 'running' not in st.session_state:
-    st.session_state.running = False
-if 'trade_history' not in st.session_state:
-    st.session_state.trade_history = []
-if 'current_pos' not in st.session_state:
-    st.session_state.current_pos = 0
-if 'balance' not in st.session_state:
-    st.session_state.balance = float(initial_balance)
-if 'shares' not in st.session_state:
-    st.session_state.shares = 0.0
-if 'portfolio_history' not in st.session_state:
-    st.session_state.portfolio_history = []
-if 'stop_loss_price' not in st.session_state:
-    st.session_state.stop_loss_price = 0.0
+if 'running' not in st.session_state: st.session_state.running = False
+if 'trade_history' not in st.session_state: st.session_state.trade_history = []
+if 'current_pos' not in st.session_state: st.session_state.current_pos = 0
+if 'balance' not in st.session_state: st.session_state.balance = float(initial_balance)
+if 'shares' not in st.session_state: st.session_state.shares = 0.0
+if 'portfolio_history' not in st.session_state: st.session_state.portfolio_history = []
+if 'stop_loss_price' not in st.session_state: st.session_state.stop_loss_price = 0.0
 
 if start_bot: st.session_state.running = True
 if stop_bot: st.session_state.running = False
@@ -96,25 +96,45 @@ if stop_bot: st.session_state.running = False
 # --- Training Tab ---
 with tab_train:
     st.header("🧠 Agent Training")
-    timesteps = st.number_input("Timesteps", 1000, 500000, 50000)
-    train_btn = st.button("Train New Model")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Model Configuration")
+        model_mode = st.radio("Training Mode", ["Train Fresh", "Resume Existing"])
+        indicators = st.multiselect("Technical Indicators", ["SMA_10", "SMA_30", "RSI", "MACD", "Bollinger"], default=["SMA_10", "SMA_30", "RSI"])
+        timesteps = st.number_input("Total Timesteps", 1000, 1000000, 50000, step=1000)
+
+    with col2:
+        st.subheader("Hyperparameters")
+        lr = st.number_input("Learning Rate", 1e-6, 1e-2, 3e-4, format="%.6f")
+        gamma = st.slider("Gamma (Discount)", 0.8, 0.999, 0.99)
+        ent_coef = st.slider("Entropy Coef", 0.0, 0.1, 0.01, format="%.3f")
+
+    train_btn = st.button("🔥 Start Training Session", width="stretch")
 
     metrics_area = st.empty()
     prog_bar = st.progress(0)
 
     if train_btn:
-        with st.spinner("Preparing Data..."):
-            df = preprocess_data()
+        with st.spinner("Processing Data..."):
+            df = preprocess_data(indicators=indicators)
 
         env = TradingEnv(df)
-        model = PPO("MlpPolicy", env, verbose=0, device="cpu")
+        model_path = "Logic/ppo_trading_model"
 
-        st.info("Training started! Watch metrics update below.")
+        if model_mode == "Resume Existing" and os.path.exists(model_path + ".zip"):
+            st.info("Loading existing model...")
+            model = PPO.load(model_path, env=env, learning_rate=lr, gamma=gamma, ent_coef=ent_coef)
+        else:
+            st.info("Initializing new MlpPolicy model...")
+            model = PPO("MlpPolicy", env, verbose=0, device="cpu", learning_rate=lr, gamma=gamma, ent_coef=ent_coef)
+
+        st.toast("Training started!")
         callback = StreamlitCallback(metrics_area, prog_bar)
         model.learn(total_timesteps=timesteps, callback=callback)
 
-        model.save("Logic/ppo_trading_model")
-        st.success("Training complete! Model saved to Logic/ppo_trading_model.zip")
+        model.save(model_path)
+        st.success(f"Model saved successfully to {model_path}.zip")
         st.cache_resource.clear()
 
 # --- Live/Sim Tab ---
@@ -137,25 +157,26 @@ with tab_live:
     TX_COST = 0.001
 
     try:
-        df = get_trading_data()
+        # Fetch current feature set from model's env expectation or just use selected
+        # (Assuming model was trained with the same indicators selected in Training tab)
+        # For robustness, we'd store indicator config with the model.
+        # Here we just use default/current for demo.
+        df = get_trading_data(indicators=["SMA_10", "SMA_30", "RSI", "MACD", "Bollinger"])
         current_price = float(df.iloc[-1]['Close'])
         now = datetime.now()
 
-        # Kill Switch
-        if kill_switch and st.session_state.current_pos == 1:
-            if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
-                try:
-                    client = TradingClient(api_key, api_secret, paper=True)
-                    client.close_position('BTCUSD')
-                except: pass
-            st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
-            st.session_state.shares = 0
-            st.session_state.current_pos = 0
-            st.session_state.trade_history.append({'time': now, 'type': 'KILL SWITCH', 'price': current_price})
+        if kill_switch:
+            if st.session_state.current_pos == 1:
+                if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
+                    try: TradingClient(api_key, api_secret, paper=True).close_position('BTCUSD')
+                    except: pass
+                st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
+                st.session_state.shares = 0
+                st.session_state.current_pos = 0
+                st.session_state.trade_history.append({'time': now, 'type': 'KILL SWITCH', 'price': current_price})
             st.session_state.running = False
 
         if st.session_state.running:
-            # Live paper sync
             if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                 try:
                     client = TradingClient(api_key, api_secret, paper=True)
@@ -165,49 +186,43 @@ with tab_live:
                     st.session_state.balance = float(client.get_account().cash)
                 except: st.session_state.current_pos = 0
 
-            # Logic
+            # Predict
             last_row = df.iloc[-1]
-            obs = np.array([
-                last_row['Close'], last_row['High'], last_row['Low'],
-                last_row['Open'], last_row['Volume'], last_row['SMA_10'],
-                last_row['SMA_30'], last_row['RSI'], st.session_state.current_pos
-            ], dtype=np.float32)
+            # Match features to TradingEnv logic
+            feature_cols = [c for c in df.columns if c not in ['Date', 'index']]
+            obs = last_row[feature_cols].values / current_price
+            obs = np.append(obs, st.session_state.current_pos).astype(np.float32)
 
-            action, _states = model.predict(obs, deterministic=True)
-
-            # Predict probabilities for planning insights
-            # Note: SB3 PPO get_distribution requires some internal access
+            action, _ = model.predict(obs, deterministic=True)
             dist = model.policy.get_distribution(model.policy.obs_to_tensor(obs)[0])
             probs = dist.distribution.probs.detach().numpy()[0]
             confidence = probs[action]
 
-            # STOP LOSS
+            # Stop Loss
             if st.session_state.current_pos == 1 and current_price <= st.session_state.stop_loss_price:
-                if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
-                    try: client.close_position('BTCUSD')
+                if run_mode == "Paper Trading (Alpaca)":
+                    try: TradingClient(api_key, api_secret, paper=True).close_position('BTCUSD')
                     except: pass
                 st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
                 st.session_state.shares = 0
                 st.session_state.current_pos = 0
                 st.session_state.trade_history.append({'time': now, 'type': 'STOP LOSS', 'price': current_price})
 
-            # TRADES
+            # Trade execution
             if action == 1 and st.session_state.current_pos == 0:
                 risk_amt = st.session_state.balance * risk_per_trade
                 price_risk = current_price * stop_loss_pct
                 qty = risk_amt / price_risk
                 cost = qty * current_price * (1 + TX_COST)
-
                 if cost > st.session_state.balance:
                     qty = (st.session_state.balance * (1 - TX_COST)) / current_price
                     cost = st.session_state.balance
 
                 if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
                     try:
-                        client = TradingClient(api_key, api_secret, paper=True)
                         req = MarketOrderRequest(symbol="BTCUSD", qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
-                        client.submit_order(req)
-                    except Exception as e: st.sidebar.error(f"Alpaca: {e}")
+                        TradingClient(api_key, api_secret, paper=True).submit_order(req)
+                    except: pass
 
                 st.session_state.shares = qty
                 st.session_state.balance -= cost
@@ -217,14 +232,14 @@ with tab_live:
 
             elif action == 0 and st.session_state.current_pos == 1:
                 if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
-                    try: client.close_position('BTCUSD')
+                    try: TradingClient(api_key, api_secret, paper=True).close_position('BTCUSD')
                     except: pass
                 st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
                 st.session_state.shares = 0
                 st.session_state.current_pos = 0
                 st.session_state.trade_history.append({'time': now, 'type': 'SELL', 'price': current_price})
 
-        # --- UI DISPLAY ---
+        # Dashboard View
         current_val = st.session_state.balance + (st.session_state.shares * current_price)
         st.session_state.portfolio_history.append((now, current_val))
         hist_df = pd.DataFrame(st.session_state.portfolio_history, columns=['time', 'value'])
@@ -233,17 +248,14 @@ with tab_live:
         p_1h = current_val - (hist_df[hist_df['time'] >= (now - timedelta(hours=1))]['value'].iloc[0] if not hist_df[hist_df['time'] >= (now - timedelta(hours=1))].empty else current_val)
 
         with placeholder.container():
-            # Planning Insights
             if st.session_state.running:
                 st.subheader("🤖 Model Insights")
                 cc1, cc2 = st.columns(2)
-                cc1.info(f"**Current Action:** {'LONG' if action==1 else 'FLAT'}")
-                cc2.info(f"**Confidence:** {confidence:.1%}")
-
-                with st.expander("Show Features (Input Vector)"):
+                cc1.info(f"**Planned Action:** {'LONG' if action==1 else 'FLAT'}")
+                cc2.info(f"**Model Confidence:** {confidence:.1%}")
+                with st.expander("Analysis: Input Feature Vector (Scaled)"):
                     st.write(obs)
 
-            # Metrics
             st.write("---")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Status", "🏃 Running" if st.session_state.running else "🛑 Stopped")
@@ -253,14 +265,14 @@ with tab_live:
 
             m1b, m2b, m3b = st.columns(3)
             m1b.metric("Profit (All-time)", f"${p_all_time:,.2f}", f"{(p_all_time/initial_balance):.2%}")
-            m2b.metric("Profit (24h)", f"${p_24h:,.2f}")
-            m3b.metric("Profit (1h)", f"${p_1h:,.2f}")
+            m2b.metric("Profit (Last 24h)", f"${p_24h:,.2f}")
+            m3b.metric("Profit (Last 1h)", f"${p_1h:,.2f}")
 
-            # Chart
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="BTC Price"))
             if st.session_state.current_pos == 1:
                 fig.add_hline(y=st.session_state.stop_loss_price, line_dash="dash", line_color="red", annotation_text="Stop Loss")
+            fig.update_layout(height=400, margin=dict(l=20,r=20,t=20,b=20))
             st.plotly_chart(fig, width="stretch")
 
             st.subheader("Trade Log")
@@ -268,7 +280,7 @@ with tab_live:
                 st.table(pd.DataFrame(st.session_state.trade_history).tail(10))
 
     except Exception as e:
-        st.error(f"Loop Error: {e}")
+        st.error(f"Execution Error: {e}")
 
 time.sleep(sim_speed)
 st.rerun()

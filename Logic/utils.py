@@ -11,15 +11,40 @@ def compute_rsi(series, window=14):
     rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs.fillna(0)))
 
-def get_trading_data(period="7d", interval="1h"):
+def compute_macd(series, fast=12, slow=26, signal=9):
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd, signal_line
+
+def compute_bollinger_bands(series, window=20, std_dev=2):
+    sma = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
+    upper = sma + (std * std_dev)
+    lower = sma - (std * std_dev)
+    return upper, lower
+
+def get_trading_data(period="7d", interval="1h", indicators=["SMA_10", "SMA_30", "RSI"]):
     ticker = "BTC-USD"
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    df['SMA_10'] = df['Close'].rolling(window=10).mean()
-    df['SMA_30'] = df['Close'].rolling(window=30).mean()
-    df['RSI'] = compute_rsi(df['Close'], window=14)
+
+    if "SMA_10" in indicators: df['SMA_10'] = df['Close'].rolling(window=10).mean()
+    if "SMA_30" in indicators: df['SMA_30'] = df['Close'].rolling(window=30).mean()
+    if "RSI" in indicators: df['RSI'] = compute_rsi(df['Close'], window=14)
+    if "MACD" in indicators:
+        macd, signal = compute_macd(df['Close'])
+        df['MACD'] = macd
+        df['MACD_Signal'] = signal
+    if "Bollinger" in indicators:
+        upper, lower = compute_bollinger_bands(df['Close'])
+        df['BB_Upper'] = upper
+        df['BB_Lower'] = lower
+
     return df.dropna()
 
 def download_historical_data(ticker="BTC-USD"):

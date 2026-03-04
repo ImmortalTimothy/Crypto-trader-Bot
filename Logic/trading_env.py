@@ -15,13 +15,16 @@ class TradingEnv(gym.Env):
         self.risk_per_trade = risk_per_trade
         self.stop_loss_pct = stop_loss_pct
 
+        # Features from DF (all columns except Date if present)
+        self.feature_cols = [c for c in df.columns if c not in ['Date', 'index']]
+        self.n_features = len(self.feature_cols)
+
         # Action space: 0 = Flat, 1 = Long
         self.action_space = spaces.Discrete(2)
 
-        # Observation space: OHLCV + indicators + current position
-        # Features: Close, High, Low, Open, Volume, SMA_10, SMA_30, RSI (8 features) + position (1 feature)
+        # Observation space: Features + position (1 feature)
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(self.n_features + 1,), dtype=np.float32
         )
 
         self.current_step = 0
@@ -34,7 +37,12 @@ class TradingEnv(gym.Env):
         self.history = []
 
     def _get_observation(self):
-        obs = self.df.iloc[self.current_step][['Close', 'High', 'Low', 'Open', 'Volume', 'SMA_10', 'SMA_30', 'RSI']].values
+        obs = self.df.iloc[self.current_step][self.feature_cols].values
+        # Simple feature scaling/normalization for better convergence
+        # Divide by current price to make features relative
+        current_price = self.df.iloc[self.current_step]['Close']
+        obs = obs / current_price
+
         obs = np.append(obs, self.position)
         return obs.astype(np.float32)
 
@@ -56,28 +64,21 @@ class TradingEnv(gym.Env):
     def step(self, action):
         current_price = self.df.iloc[self.current_step]['Close']
 
-        # Check for Stop Loss if in position
+        # Check for Stop Loss
         if self.position == 1 and current_price <= self.stop_loss_price:
-            # Automatic Exit
             self.balance += self.shares_held * current_price * (1 - self.transaction_cost)
             self.shares_held = 0
             self.position = 0
             self.entry_price = 0
             self.stop_loss_price = 0
 
-        # Execute actions if not stopped out
+        # Execute actions
         if action == 1 and self.position == 0: # Buy
-            # 2% Risk Rule Position Sizing:
-            # Risk Amount = Balance * 2%
-            # Position Size = Risk Amount / (Entry Price - Stop Loss Price)
-            # Stop Loss Price = Entry Price * (1 - stop_loss_pct)
             risk_amount = self.balance * self.risk_per_trade
             price_risk_per_share = current_price * self.stop_loss_pct
-
             desired_shares = risk_amount / price_risk_per_share
             cost = desired_shares * current_price * (1 + self.transaction_cost)
 
-            # Ensure we don't exceed balance
             if cost > self.balance:
                 self.shares_held = (self.balance * (1 - self.transaction_cost)) / current_price
                 self.balance = 0
@@ -90,7 +91,6 @@ class TradingEnv(gym.Env):
             self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
 
         elif action == 0 and self.position == 1: # Sell
-            # Manual Sell all shares
             self.balance += self.shares_held * current_price * (1 - self.transaction_cost)
             self.shares_held = 0
             self.position = 0
@@ -99,13 +99,13 @@ class TradingEnv(gym.Env):
 
         self.current_step += 1
 
-        # Update portfolio value
         if self.position == 1:
             self.portfolio_value = self.balance + (self.shares_held * self.df.iloc[self.current_step]['Close'])
         else:
             self.portfolio_value = self.balance
 
-        reward = np.log(self.portfolio_value / self.history[-1]) if self.history[-1] > 0 else 0
+        # Scaled reward to encourage learning
+        reward = (self.portfolio_value / self.history[-1]) - 1.0
         self.history.append(self.portfolio_value)
 
         done = self.current_step >= len(self.df) - 1
@@ -115,6 +115,3 @@ class TradingEnv(gym.Env):
         info = {'portfolio_value': self.portfolio_value, 'position': self.position}
 
         return observation, reward, done, truncated, info
-
-    def render(self, mode='human'):
-        print(f'Step: {self.current_step}, Portfolio Value: {self.portfolio_value:.2f}, Position: {self.position}')

@@ -6,23 +6,79 @@ import time
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from utils import get_trading_data
+import os
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 
 # Set page config
-st.set_page_config(page_title="Crypto RL Trader", layout="wide")
+st.set_page_config(page_title="Crypto RL Trader Control", layout="wide")
 
 # Load the trained model
 @st.cache_resource
 def load_model():
-    return PPO.load("ppo_trading_model")
+    # Correct file path in sandbox or prod
+    model_path = "ppo_trading_model.zip"
+    if os.path.exists(model_path):
+        return PPO.load(model_path)
+    return None
 
 model = load_model()
 
-# Risk Management Settings
-RISK_PER_TRADE = 0.02
-STOP_LOSS_PCT = 0.05
-TX_COST = 0.001
+# --- Sidebar: Controls ---
+st.sidebar.title("Trading Bot Controls")
 
+# Mode Selection
+run_mode = st.sidebar.selectbox("Mode", ["Simulation", "Paper Trading (Alpaca)"])
+
+# Credentials in sidebar
+api_key = st.sidebar.text_input("Alpaca API Key", type="password") if run_mode == "Paper Trading (Alpaca)" else ""
+api_secret = st.sidebar.text_input("Alpaca Secret Key", type="password") if run_mode == "Paper Trading (Alpaca)" else ""
+
+# Risk Management Controls
+st.sidebar.subheader("Risk Management")
+risk_per_trade = st.sidebar.slider("Risk per Trade (%)", 0.5, 5.0, 2.0) / 100.0
+stop_loss_pct = st.sidebar.slider("Stop Loss (%)", 1.0, 10.0, 5.0) / 100.0
+initial_balance = st.sidebar.number_input("Starting Balance ($)", 100, 100000, 10000)
+
+# Bot Execution Controls
+col_start, col_stop = st.sidebar.columns(2)
+start_bot = col_start.button("🚀 Start Bot", use_container_width=True)
+stop_bot = col_stop.button("🛑 Stop Bot", use_container_width=True)
+kill_switch = st.sidebar.button("💀 KILL SWITCH (Sell All & Stop)", type="primary", use_container_width=True)
+
+# --- Main App State ---
+if 'running' not in st.session_state:
+    st.session_state.running = False
+if 'trade_history' not in st.session_state:
+    st.session_state.trade_history = []
+if 'current_pos' not in st.session_state:
+    st.session_state.current_pos = 0
+if 'balance' not in st.session_state:
+    st.session_state.balance = float(initial_balance)
+if 'shares' not in st.session_state:
+    st.session_state.shares = 0.0
+if 'portfolio_history' not in st.session_state:
+    st.session_state.portfolio_history = []
+if 'stop_loss_price' not in st.session_state:
+    st.session_state.stop_loss_price = 0.0
+
+if start_bot:
+    st.session_state.running = True
+if stop_bot:
+    st.session_state.running = False
+if kill_switch:
+    st.session_state.running = False
+
+st.title("₿ Bitcoin RL Trading Dashboard")
+
+if model is None:
+    st.warning("No trained model found! Bot will not start without a model. Please run 'train.py' first.")
+
+# --- Helper Functions ---
 def get_action(df, current_pos):
+    if model is None:
+        return 0 # Stay flat if no model
     last_row = df.iloc[-1]
     obs = np.array([
         last_row['Close'], last_row['High'], last_row['Low'],
@@ -32,123 +88,133 @@ def get_action(df, current_pos):
     action, _ = model.predict(obs, deterministic=True)
     return action
 
-st.title("₿ Bitcoin RL Trading Dashboard (2% Risk Rule)")
-
-# Initialize session state
-if 'start_time' not in st.session_state:
-    st.session_state.start_time = datetime.now()
-if 'trade_history' not in st.session_state:
-    st.session_state.trade_history = []
-if 'current_pos' not in st.session_state:
-    st.session_state.current_pos = 0
-if 'balance' not in st.session_state:
-    st.session_state.balance = 10000.0
-if 'shares' not in st.session_state:
-    st.session_state.shares = 0.0
-if 'portfolio_history' not in st.session_state:
-    st.session_state.portfolio_history = []
-if 'stop_loss_price' not in st.session_state:
-    st.session_state.stop_loss_price = 0.0
-
+# --- Main Dashboard Logic ---
 placeholder = st.empty()
+TX_COST = 0.001
 
-# Main loop for real-time updates
-while True:
-    try:
-        df = get_trading_data()
-        if df.empty:
-            st.error("Failed to fetch data. Retrying in 60s...")
-            time.sleep(60)
-            continue
+try:
+    df = get_trading_data()
+    current_price = float(df.iloc[-1]['Close'])
+    now = datetime.now()
 
-        current_price = float(df.iloc[-1]['Close'])
-        now = datetime.now()
+    # 1. Kill Switch Execution
+    if kill_switch and st.session_state.current_pos == 1:
+        if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
+            try:
+                client = TradingClient(api_key, api_secret, paper=True)
+                client.close_position('BTCUSD')
+            except: pass
+        st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
+        st.session_state.shares = 0
+        st.session_state.current_pos = 0
+        st.session_state.trade_history.append({'time': now, 'type': 'KILL SWITCH EXIT', 'price': current_price})
+        st.session_state.running = False
 
-        # Check for Stop Loss
+    # 2. Main Bot Logic (only if running and model exists)
+    if st.session_state.running and model is not None:
+        # Sync position from Alpaca if in live mode
+        if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
+            try:
+                client = TradingClient(api_key, api_secret, paper=True)
+                pos = client.get_open_position('BTCUSD')
+                st.session_state.current_pos = 1 if float(pos.qty) > 0 else 0
+                st.session_state.shares = float(pos.qty)
+                st.session_state.balance = float(client.get_account().cash)
+            except:
+                st.session_state.current_pos = 0
+
+        # Stop Loss Check
         if st.session_state.current_pos == 1 and current_price <= st.session_state.stop_loss_price:
+            if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
+                try: client.close_position('BTCUSD')
+                except: pass
             st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
             st.session_state.shares = 0
             st.session_state.current_pos = 0
-            st.session_state.stop_loss_price = 0.0
             st.session_state.trade_history.append({'time': now, 'type': 'STOP LOSS EXIT', 'price': current_price})
 
-        # Agent decides action
+        # Action
         action = get_action(df, st.session_state.current_pos)
 
-        # Execute action logic
         if action == 1 and st.session_state.current_pos == 0:
-            # Buy with 2% risk rule
-            risk_amount = st.session_state.balance * RISK_PER_TRADE
-            price_risk_per_share = current_price * STOP_LOSS_PCT
-            desired_shares = risk_amount / price_risk_per_share
-            cost = desired_shares * current_price * (1 + TX_COST)
+            # BUY
+            risk_amt = st.session_state.balance * risk_per_trade
+            price_risk = current_price * stop_loss_pct
+            qty = risk_amt / price_risk
+            cost = qty * current_price * (1 + TX_COST)
 
             if cost > st.session_state.balance:
-                st.session_state.shares = (st.session_state.balance * (1 - TX_COST)) / current_price
-                st.session_state.balance = 0
-            else:
-                st.session_state.shares = desired_shares
-                st.session_state.balance -= cost
+                qty = (st.session_state.balance * (1 - TX_COST)) / current_price
+                cost = st.session_state.balance
 
+            if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
+                try:
+                    client = TradingClient(api_key, api_secret, paper=True)
+                    req = MarketOrderRequest(symbol="BTCUSD", qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
+                    client.submit_order(req)
+                except Exception as e:
+                    st.sidebar.error(f"Alpaca Error: {e}")
+
+            st.session_state.shares = qty
+            st.session_state.balance -= cost
             st.session_state.current_pos = 1
-            st.session_state.stop_loss_price = current_price * (1 - STOP_LOSS_PCT)
+            st.session_state.stop_loss_price = current_price * (1 - stop_loss_pct)
             st.session_state.trade_history.append({'time': now, 'type': 'BUY', 'price': current_price})
 
         elif action == 0 and st.session_state.current_pos == 1:
-            # Manual Sell
+            # SELL
+            if run_mode == "Paper Trading (Alpaca)" and api_key and api_secret:
+                try:
+                    client = TradingClient(api_key, api_secret, paper=True)
+                    client.close_position('BTCUSD')
+                except: pass
             st.session_state.balance += st.session_state.shares * current_price * (1 - TX_COST)
             st.session_state.shares = 0
             st.session_state.current_pos = 0
-            st.session_state.stop_loss_price = 0.0
             st.session_state.trade_history.append({'time': now, 'type': 'SELL', 'price': current_price})
 
-        # Update portfolio value
-        current_portfolio_value = st.session_state.balance + (st.session_state.shares * current_price)
-        st.session_state.portfolio_history.append((now, current_portfolio_value))
+    # 3. Update Portfolio and UI
+    current_val = st.session_state.balance + (st.session_state.shares * current_price)
+    st.session_state.portfolio_history.append((now, current_val))
 
-        # Calculate metrics
-        initial_value = 10000.0
-        profit_all_time = current_portfolio_value - initial_value
-        history_df = pd.DataFrame(st.session_state.portfolio_history, columns=['time', 'value'])
+    # Limit portfolio history to last 1000 entries
+    if len(st.session_state.portfolio_history) > 1000:
+        st.session_state.portfolio_history = st.session_state.portfolio_history[-1000:]
 
-        # Daily profit
-        val_24h_ago = history_df[history_df['time'] >= (now - timedelta(days=1))]['value'].iloc[0] if not history_df[history_df['time'] >= (now - timedelta(days=1))].empty else current_portfolio_value
-        profit_today = current_portfolio_value - val_24h_ago
+    hist_df = pd.DataFrame(st.session_state.portfolio_history, columns=['time', 'value'])
+    p_all_time = current_val - initial_balance
+    p_24h = current_val - (hist_df[hist_df['time'] >= (now - timedelta(days=1))]['value'].iloc[0] if not hist_df[hist_df['time'] >= (now - timedelta(days=1))].empty else current_val)
+    p_1h = current_val - (hist_df[hist_df['time'] >= (now - timedelta(hours=1))]['value'].iloc[0] if not hist_df[hist_df['time'] >= (now - timedelta(hours=1))].empty else current_val)
 
-        # Hourly profit
-        val_1h_ago = history_df[history_df['time'] >= (now - timedelta(hours=1))]['value'].iloc[0] if not history_df[history_df['time'] >= (now - timedelta(hours=1))].empty else current_portfolio_value
-        profit_last_hour = current_portfolio_value - val_1h_ago
+    with placeholder.container():
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Bot Status", "🏃 Running" if st.session_state.running else "🛑 Stopped")
+        col2.metric("Portfolio Value", f"${current_val:,.2f}")
+        col3.metric("BTC Price", f"${current_price:,.2f}")
+        col4.metric("Holding", "Bitcoin" if st.session_state.current_pos == 1 else "USD")
 
-        with placeholder.container():
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("BTC Price", f"${current_price:,.2f}")
-            m2.metric("Portfolio Value", f"${current_portfolio_value:,.2f}")
-            m3.metric("Holding", "Bitcoin" if st.session_state.current_pos == 1 else "USD")
-            m4.metric("Profit All-time", f"${profit_all_time:,.2f}", f"{(profit_all_time/initial_value):.2%}")
+        st.write("---")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Profit (All-time)", f"${p_all_time:,.2f}", f"{(p_all_time/initial_balance):.2%}")
+        m2.metric("Profit (Last 24h)", f"${p_24h:,.2f}")
+        m3.metric("Profit (Last 1h)", f"${p_1h:,.2f}")
 
-            m1b, m2b, m3b, m4b, m5b = st.columns(5)
-            m1b.metric("Profit (24h)", f"${profit_today:,.2f}")
-            m2b.metric("Profit (1h)", f"${profit_last_hour:,.2f}")
-            m3b.metric("Risk per Trade", f"{RISK_PER_TRADE:.1%}")
-            m4b.metric("Stop Loss", f"{STOP_LOSS_PCT:.1%}")
-            m5b.metric("SL Price", f"${st.session_state.stop_loss_price:,.2f}" if st.session_state.current_pos == 1 else "N/A")
+        # Chart
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="BTC Price"))
+        if st.session_state.current_pos == 1:
+            fig.add_hline(y=st.session_state.stop_loss_price, line_dash="dash", line_color="red", annotation_text="Stop Loss")
+        st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("BTC-USD Live Chart")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="BTC Price"))
-            if st.session_state.current_pos == 1:
-                fig.add_hline(y=st.session_state.stop_loss_price, line_dash="dash", line_color="red", annotation_text="Stop Loss")
-            st.plotly_chart(fig, use_container_width=True)
+        # Trade Log
+        st.subheader("Trade Log")
+        if st.session_state.trade_history:
+            log_df = pd.DataFrame(st.session_state.trade_history).tail(10)
+            st.table(log_df)
 
-            st.subheader("Recent Activity")
-            if st.session_state.trade_history:
-                st.table(pd.DataFrame(st.session_state.trade_history).tail(10))
-            else:
-                st.info("Waiting for first trade signal...")
+except Exception as e:
+    st.error(f"Error in dashboard: {e}")
 
-            st.caption(f"Last updated: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-    time.sleep(60)
+# Auto-refresh using Streamlit's rerun every minute
+time.sleep(60)
+st.rerun()

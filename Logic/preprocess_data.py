@@ -1,6 +1,11 @@
+import os
+import sys
+
+# Ensure project root is in path before internal Logic imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pandas as pd
 from Logic.utils import download_historical_data, compute_rsi, compute_macd, compute_bollinger_bands
-import os
 
 def preprocess_data(csv_path=os.path.join("Data", "btc_data.csv"), indicators=["SMA_10", "SMA_30", "RSI"]):
     if not os.path.exists(csv_path):

@@ -34,7 +34,9 @@ def run_paper_trading():
 
     while True:
         try:
-            df = get_trading_data()
+            # Sync with the indicators used during last training/dashboard usage
+            # For robustness, using a broad set here.
+            df = get_trading_data(indicators=["SMA_10", "SMA_30", "RSI", "MACD", "Bollinger"])
             last_row = df.iloc[-1]
             current_price = float(last_row['Close'])
 
@@ -51,11 +53,10 @@ def run_paper_trading():
                 trading_client.close_position('BTCUSD')
                 current_pos = 0
 
-            obs = np.array([
-                last_row['Close'], last_row['High'], last_row['Low'],
-                last_row['Open'], last_row['Volume'], last_row['SMA_10'],
-                last_row['SMA_30'], last_row['RSI'], current_pos
-            ], dtype=np.float32)
+            # --- NEW: Observation Normalization/Scaling to match TrainingEnv ---
+            feature_cols = [c for c in df.columns if c not in ['Date', 'index']]
+            obs = last_row[feature_cols].values / (current_price if current_price != 0 else 1)
+            obs = np.append(obs, current_pos).astype(np.float32)
 
             action, _ = model.predict(obs, deterministic=True)
 
